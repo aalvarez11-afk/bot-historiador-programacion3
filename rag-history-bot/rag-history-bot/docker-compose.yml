@@ -1,0 +1,94 @@
+networks:
+  rag_net:
+    driver: bridge
+
+volumes:
+  qdrant_storage:
+  ollama_models:
+
+services:
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    networks:
+      - rag_net
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/6333 && echo -e 'GET /healthz HTTP/1.0\r\n\r\n' >&3 && timeout 3 cat <&3 | head -1 | grep -q '200'"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    networks:
+      - rag_net
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/11434 && echo -e 'GET /api/tags HTTP/1.0\r\n\r\n' >&3 && timeout 3 cat <&3 | head -1 | grep -q '200'"]
+      interval: 20s
+      timeout: 15s
+      retries: 15
+      start_period: 60s
+
+  ingest:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ingest
+    command: python scripts/ingest.py
+    environment:
+      - QDRANT_URL=http://qdrant:6333
+      - OLLAMA_URL=http://ollama:11434
+      - EMBED_MODEL=nomic-embed-text
+      - COLLECTION_NAME=historia_cultura
+      - VECTOR_SIZE=768
+    volumes:
+      - ./data:/app/data
+      - ./scripts:/app/scripts
+    networks:
+      - rag_net
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    restart: "no"
+
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: telegram_bot
+    command: python app/bot.py
+    environment:
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
+      - QDRANT_URL=http://qdrant:6333
+      - OLLAMA_URL=http://ollama:11434
+      - EMBED_MODEL=nomic-embed-text
+      - LLM_MODEL=llama3.2:3b
+      - COLLECTION_NAME=historia_cultura
+      - VECTOR_SIZE=768
+      - TOP_K=6
+      - MAX_TOKENS=256
+      - CHUNK_SIZE=150
+      - CHUNK_OVERLAP=20
+    networks:
+      - rag_net
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    restart: unless-stopped
